@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>MatterMind v0: experiment planner</title>
+<style>
+:root{box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px);--bg:#fff;--ink:#0E2A22;--muted:#5A6E65;--line:#E0E7E0;--green:#022D24;--gold:#CFB03C;--chip:#F1F5EF;--bad:#9B2C1F;--ok:#1E7A4F;color-scheme:light}
+*,*:before,*:after{box-sizing:inherit}
+html{height:100%}
+body{margin:0;min-height:100%;background:var(--bg);color:var(--ink);font:400 15px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+header{background:var(--green);color:#fff;padding:16px}
+header b{color:var(--gold);letter-spacing:.08em;font-size:20px}
+header p{margin:4px 0 0;font-size:13px;opacity:.85}
+main{max-width:760px;margin:0 auto;padding:16px}
+.warn{background:var(--chip);border-left:4px solid var(--gold);padding:10px 12px;border-radius:6px;font-size:13px;color:var(--muted);margin-bottom:14px}
+.warn strong{color:var(--ink)}
+h2{font-size:16px;margin:18px 0 6px}
+label{display:block;font-size:13px;color:var(--muted);margin:8px 0 4px}
+textarea,select{width:100%;font:13px/1.5 ui-monospace,Menlo,Consolas,monospace;border:1px solid var(--line);border-radius:10px;padding:10px;background:#fff;color:var(--ink)}
+textarea{min-height:190px}
+select{font-family:inherit;font-size:15px}
+.row{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+button{font:600 14px system-ui,sans-serif;border:0;border-radius:10px;padding:10px 14px;cursor:pointer;background:var(--gold);color:#1a1a05}
+button.alt{background:#fff;border:1px solid var(--line);color:var(--ink)}
+button:focus-visible,textarea:focus-visible,select:focus-visible{outline:3px solid var(--green);outline-offset:2px}
+.box{border:1px solid var(--line);border-radius:12px;padding:12px;margin-top:10px;overflow-x:auto}
+table{border-collapse:collapse;width:100%;font-size:13px;min-width:420px}
+th,td{padding:6px 8px;border-bottom:1px solid var(--line);text-align:right;white-space:nowrap}
+th:first-child,td:first-child{text-align:left}
+.ok{color:var(--ok);font-weight:600}.bad{color:var(--bad);font-weight:600}
+.small{font-size:12.5px;color:var(--muted)}
+</style></head>
+<body>
+<header><b>MATTERMIND</b> v0<p>Learns from your lab results and suggests which formulations to test next.</p></header>
+<main>
+<div class="warn"><strong>What this is and isn't.</strong> It knows no materials science. It only learns patterns in the results you enter, then suggests experiments. The sample data below is <strong>synthetic and invented</strong> to show the workflow. Never treat its output as a tested or safe material.</div>
+
+<h2>1. Your experiments</h2>
+<p class="small">One row per formulation. Header row first, comma-separated. The <strong>last column is the measured result</strong>. Ingredient columns can be any numbers (e.g. percentages that sum to 100).</p>
+<label for="data">Results table</label>
+<textarea id="data" spellcheck="false"></textarea>
+<label for="dir">Goal for the last column</label>
+<select id="dir"><option value="min">Make it as low as possible (e.g. thermal conductivity, cost)</option><option value="max">Make it as high as possible (e.g. strength)</option></select>
+<div class="row"><button onclick="run()">Suggest next experiments</button><button class="alt" onclick="demo()">Load synthetic demo</button><button class="alt" onclick="clr()">Clear</button></div>
+
+<div id="out"></div>
+<p class="small" style="margin-top:20px">Method: Gaussian-process regression with a simple RBF kernel. Suggested recipes are blends of recipes you have already tested, so ingredient totals stay consistent. The model check below uses leave-one-out error: if it is not clearly better than guessing the average, add more experiments before trusting any suggestion.</p>
+</main>
+<script>
+const DEMO="plastic,sawdust,textile,binder,conductivity\n60,20,10,10,0.082\n40,40,10,10,0.071\n30,30,30,10,0.064\n20,50,20,10,0.069\n50,10,30,10,0.075\n25,25,25,25,0.088\n35,35,20,10,0.066\n45,25,20,10,0.073\n20,20,50,10,0.061\n30,20,40,10,0.063\n15,35,40,10,0.060\n40,15,35,10,0.070";
+const $=id=>document.getElementById(id);
+const mean=a=>a.reduce((s,v)=>s+v,0)/a.length;
+const vari=a=>{const m=mean(a);return mean(a.map(v=>(v-m)**2))};
+const dot=(a,b)=>a.reduce((s,v,i)=>s+v*b[i],0);
+const d2=(a,b)=>a.reduce((s,v,i)=>s+(v-b[i])**2,0);
+function inv(A){const n=A.length,M=A.map((r,i)=>[...r,...Array.from({length:n},(_,j)=>+(i===j))]);
+ for(let i=0;i<n;i++){let p=i;for(let r=i+1;r<n;r++)if(Math.abs(M[r][i])>Math.abs(M[p][i]))p=r;[M[i],M[p]]=[M[p],M[i]];const v=M[i][i];for(let j=0;j<2*n;j++)M[i][j]/=v;
+ for(let r=0;r<n;r++)if(r!==i){const f=M[r][i];if(f)for(let j=0;j<2*n;j++)M[r][j]-=f*M[i][j]}}return M.map(r=>r.slice(n))}
+function parse(t){const rows=t.trim().split(/\n/).map(l=>l.split(/[,\t]/).map(s=>s.trim()));const h=rows[0]||[];
+ const d=rows.slice(1).filter(r=>r.length===h.length&&r.every(x=>x!==""&&!isNaN(+x))).map(r=>r.map(Number));return{h,d}}
+function fit(X,y){const n=X.length,ym=mean(y),yc=y.map(v=>v-ym),sv=vari(yc)||1,ds=[];
+ for(let i=0;i<n;i++)for(let j=i+1;j<n;j++)ds.push(Math.sqrt(d2(X[i],X[j])));
+ ds.sort((a,b)=>a-b);const ls=ds[Math.floor(ds.length/2)]||1;
+ const k=(a,b)=>sv*Math.exp(-d2(a,b)/(2*ls*ls));
+ const K=X.map((a,i)=>X.map((b,j)=>k(a,b)+(i===j?0.05*sv:0))),Ki=inv(K),alpha=Ki.map(r=>dot(r,yc));
+ return{X,ym,k,Ki,alpha,sv,n}}
+function pred(m,x){const ks=m.X.map(a=>m.k(a,x));const mu=m.ym+dot(ks,m.alpha);
+ const v=m.sv-dot(ks,m.Ki.map(r=>dot(r,ks)));return{mu,sd:Math.sqrt(Math.max(v,1e-12))}}
+function run(){const o=$("out");try{localStorage.setItem("mm_data",$("data").value)}catch(e){}
+ const{h,d}=parse($("data").value);
+ if(h.length<3||d.length<6){o.innerHTML='<div class="box bad">Need a header row, at least 2 input columns and at least 6 valid numeric rows. Keep adding experiments.</div>';return}
+ const nc=h.length-1,X0=d.map(r=>r.slice(0,nc)),y=d.map(r=>r[nc]),dir=$("dir").value==="min"?1:-1;
+ const mn=Array.from({length:nc},(_,c)=>Math.min(...X0.map(r=>r[c]))),mx=Array.from({length:nc},(_,c)=>Math.max(...X0.map(r=>r[c])));
+ const nrm=x=>x.map((v,c)=>(v-mn[c])/((mx[c]-mn[c])||1));
+ const m=fit(X0.map(nrm),y);
+ const sdy=Math.sqrt(vari(y)),rmse=Math.sqrt(mean(m.alpha.map((a,i)=>(a/m.Ki[i][i])**2))),good=rmse<0.8*sdy;
+ const cands=[];
+ for(let t=0;t<3000;t++){const k=2+Math.floor(Math.random()*2),idx=[],w=[];
+  for(let i=0;i<k;i++){idx.push(Math.floor(Math.random()*d.length));w.push(Math.random()+0.05)}
+  const s=w.reduce((a,b)=>a+b,0),x=X0[0].map((_,c)=>idx.reduce((a,ix,i)=>a+X0[ix][c]*w[i]/s,0));
+  const p=pred(m,nrm(x));cands.push({x,mu:p.mu,sd:p.sd,score:dir*p.mu-p.sd})}
+ cands.sort((a,b)=>a.score-b.score);
+ const pick=[];for(const c of cands){if(pick.length>=3)break;
+  if([...pick.map(p=>nrm(p.x)),...X0.map(nrm)].every(q=>Math.sqrt(d2(q,nrm(c.x)))>0.12))pick.push(c)}
+ const f=v=>Math.abs(v)>=100?v.toFixed(0):v.toFixed(3).replace(/\.?0+$/,"");
+ o.innerHTML=`<h2>2. Can the model be trusted yet?</h2><div class="box">Typical prediction error (leave-one-out): <strong>${f(rmse)}</strong><br>Error from just guessing the average: <strong>${f(sdy)}</strong><br>
+ <span class="${good?"ok":"bad"}">${good?"Better than guessing the average, but with only "+d.length+" experiments treat it as a rough guide.":"Not clearly better than guessing the average. Run more experiments before trusting suggestions."}</span></div>
+ <h2>3. Suggested next experiments</h2><div class="box"><table><tr>${h.slice(0,nc).map(x=>`<th>${x}</th>`).join("")}<th>predicted ${h[nc]}</th></tr>
+ ${pick.map(p=>`<tr>${p.x.map(v=>`<td>${f(v)}</td>`).join("")}<td>${f(p.mu)} ± ${f(p.sd)}</td></tr>`).join("")||'<tr><td>No new distinct recipes found. Try adding varied experiments.</td></tr>'}</table></div>
+ <p class="small">Each suggestion balances a good predicted result against uncertainty, so it may deliberately test an area you know little about. Run them in the lab, add the measured results as new rows, and run again.</p>`}
+function demo(){$("data").value=DEMO;$("out").innerHTML=""}
+function clr(){$("data").value="";$("out").innerHTML="";try{localStorage.removeItem("mm_data")}catch(e){}}
+try{$("data").value=localStorage.getItem("mm_data")||DEMO}catch(e){$("data").value=DEMO}
+</script></body></html>
